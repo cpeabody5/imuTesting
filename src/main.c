@@ -5,6 +5,7 @@
 #include <libopencm3/cm3/cortex.h>
 #include <libopencm3/stm32/adc.h>
 #include <libopencm3/cm3/systick.h>
+#include <libopencm3/stm32/spi.h>
 
 volatile uint32_t system_millis = 0;
 
@@ -31,29 +32,6 @@ void tim2_isr(void){
         timer_clear_flag(TIM2, TIM_SR_UIF);
         gpio_toggle(GPIOC, GPIO13);
     }
-
-    //if (timer_get_flag(TIM2, TIM_SR_UIF)){
-        //timer_clear_flag(TIM2, TIM_SR_UIF);
-        //gpio_toggle(GPIOC, GPIO13);
-    //}
-}
-
-void adc_setup(void){
-    rcc_periph_clock_enable(RCC_GPIOA);
-    rcc_periph_clock_enable(RCC_ADC1);
-
-    gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, GPIO0);
-    
-    adc_power_off(ADC1);
-    adc_disable_scan_mode(ADC1);
-    adc_set_single_conversion_mode(ADC1);
-    adc_set_sample_time(ADC1, 0, ADC_SMPR_SMP_239DOT5CYC);
-    adc_power_on(ADC1);
-
-    adc_reset_calibration(ADC1);
-    while (adc_is_calibrating(ADC1));
-    adc_calibrate(ADC1);
-    while (adc_is_calibrating(ADC1));
 }
 
 void sys_tick_handler(void) __attribute__((interrupt("IRQ")));
@@ -81,67 +59,53 @@ uint16_t read_adc(void){
 
 }
 
-//int filterTemp(int32_t newTemp, int32_t data[], int32_t size, int32_t* i){
-//
-//    data[*i] = newTemp;
-//    ++*i;
-//    if (*i >= size){
-//        *i %= 20;
-//    }
-//    int32_t filteredTemp = 0;
-//    for (int j = 0; j < size; j++){
-//        filteredTemp += data[j];
-//    }
-//
-//    filteredTemp /= size;
-//
-//    return filteredTemp;
-//
-//}
+uint8_t spiRead(void){
+    while(!(SPI_SR(SPI1) & SPI_SR_RXNE));
+    return SPI_DR(SPI1);
+}
+
+void spiWrite(uint8_t data){
+    while(!(SPI_SR(SPI1) & SPI_SR_TXE));
+    SPI_DR(SPI1) = data;
+}
 
 int main(void) {
     rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
-    //rcc_clock_setup_in_hsi_out_24mhz();
-    //rcc_clock_setup_pll(&rcc_hsi_configs[RCC_CLOCK_HSI_24MHZ]);
     rcc_periph_clock_enable(RCC_GPIOC);
-    rcc_periph_clock_enable(RCC_GPIOB);
-    gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
-                  GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
+    rcc_periph_clock_enable(RCC_SPI1);
+    gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
+    gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO14);
 
-    
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO0);
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO1);
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO10);
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO11);
+    gpio_set_mode(GPIOA, GPIO_SPI1_NSS, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO4);         //CS
+    gpio_set_mode(GPIOA, GPIO_SPI1_SCK, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO5);         //SPC
+    gpio_set_mode(GPIOA, GPIO_SPI1_MISO, GPIO_CNF_INPUT_FLOAT, GPIO6);                  //SDO
+    gpio_set_mode(GPIOA, GPIO_SPI1_MOSI, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO7);        //SDI
 
     cm_enable_interrupts();
     timer_setup();
-    adc_setup();
     systick_setup();
+    spi_init_master(SPI1, SPI_CR1_BAUDRATE_FPCLK_DIV_16, SPI_CR1_CPOL_CLK_TO_1_WHEN_IDLE, 
+        SPI_CR1_CPHA_CLK_TRANSITION_1, 1, 0);
+    spi_enable(SPI1);
 
-    int32_t filteredTemp = 0;
-
+    uint16_t data;
+    uint8_t imuRegAddr = 1;
     while(1){
-        int16_t raw = read_adc();
-        int32_t temp_c = ((raw * 3300 / 4095) - 500) / 10; 
+        imuRegAddr++;
+        imuRegAddr %= 0x6B;
 
-        filteredTemp = (filteredTemp + temp_c) / 2;
-
-        gpio_clear(GPIOB, GPIO0);
-        gpio_clear(GPIOB, GPIO1);
-        gpio_clear(GPIOB, GPIO10);
-        gpio_clear(GPIOB, GPIO11);
-
-        if (filteredTemp <= 20){
-            gpio_set(GPIOB, GPIO0);
+        gpio_clear(GPIOA, GPIO4);
+        spiWrite(((1<<7) | imuRegAddr));
+        uint16_t test = 1<<7;
+        test = test | imuRegAddr;
+        data = spiRead();
+        gpio_set(GPIOA, GPIO4);
+        if (data != 0){
+            gpio_set(GPIOC, GPIO14);
         }
-        if (filteredTemp > 20 && filteredTemp <= 30){
-            gpio_set(GPIOB, GPIO1);
+        else{
+            gpio_clear(GPIOC, GPIO14);
         }
-        if (filteredTemp > 30){
-            gpio_set(GPIOB, GPIO10);
-            gpio_set(GPIOB, GPIO11);
-        }
-        msleep(50);
+    
     }
 }
